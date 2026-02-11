@@ -1,22 +1,45 @@
+import argparse
 import asyncio
 import csv
+from urllib.parse import quote
 from playwright.async_api import async_playwright
 
 # =========================
-# 🔥 전역 설정
+# 🔥 전역 설정 (인자 없을 때 기본값)
 # =========================
 
 HEADLESS = False          # True면 브라우저 안보임
 SLOW_MO = 0               # 동작 느리게 보고 싶으면 100~300
 TARGET_COUNT = 1000
-SEARCH_URL = "https://www.daangn.com/search/아이폰"
 
 ITEM_SELECTOR = "a[data-gtm='search_article']"
 MORE_BUTTON_SELECTOR = "div[data-gtm='search_show_more_articles'] button"
 
 # =========================
 
-async def main():
+def _build_search_url(keyword: str, region: str | None = None) -> str:
+    """검색 키워드로 당근 검색 URL 생성."""
+    base = "https://www.daangn.com/kr/buy-sell/"
+    url = f"{base}?search={quote(keyword)}"
+    # region 사용 시: url += f"&in={quote(region)}"
+    return url
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser(
+        description="당근마켓 검색 크롤링",
+        epilog="예시:  python carrot-rough-crawl.py --keyword 아이폰",
+    )
+    parser.add_argument("--keyword", "-k", required=True, help="검색 키워드")
+    # parser.add_argument("--region", "-r", help="동네 (동이름-코드, 예: 역삼동-6035). 미사용 시 내 위치 기준")
+    return parser.parse_args()
+
+
+async def main(keyword: str):
+    search_url = _build_search_url(keyword)
+    print("검색 URL:", search_url)
+    print("키워드:", keyword)
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=HEADLESS,
@@ -24,7 +47,7 @@ async def main():
         )
         page = await browser.new_page()
 
-        await page.goto(SEARCH_URL)
+        await page.goto(search_url)
         await page.wait_for_load_state("networkidle")
 
         print("페이지 타이틀:", await page.title())
@@ -160,4 +183,5 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    args = _parse_args()
+    asyncio.run(main(keyword=args.keyword))
