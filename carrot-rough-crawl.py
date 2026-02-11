@@ -1,0 +1,163 @@
+import asyncio
+import csv
+from playwright.async_api import async_playwright
+
+# =========================
+# 🔥 전역 설정
+# =========================
+
+HEADLESS = False          # True면 브라우저 안보임
+SLOW_MO = 0               # 동작 느리게 보고 싶으면 100~300
+TARGET_COUNT = 1000
+SEARCH_URL = "https://www.daangn.com/search/아이폰"
+
+ITEM_SELECTOR = "a[data-gtm='search_article']"
+MORE_BUTTON_SELECTOR = "div[data-gtm='search_show_more_articles'] button"
+
+# =========================
+
+async def main():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=HEADLESS,
+            slow_mo=SLOW_MO
+        )
+        page = await browser.new_page()
+
+        await page.goto(SEARCH_URL)
+        await page.wait_for_load_state("networkidle")
+
+        print("페이지 타이틀:", await page.title())
+
+        prev_count = 0
+
+        # =========================
+        # 🔥 더보기 반복
+        # =========================
+        while True:
+            cards = page.locator(ITEM_SELECTOR)
+            count = await cards.count()
+            print("현재 개수:", count)
+
+            if count >= TARGET_COUNT:
+                print("목표 개수 도달")
+                break
+
+            if count == prev_count:
+                print("더 이상 증가하지 않음")
+                break
+
+            prev_count = count
+
+            more_btn = page.locator(MORE_BUTTON_SELECTOR)
+
+            if await more_btn.count() == 0:
+                print("더보기 버튼 없음 → 종료")
+                break
+
+            if not await more_btn.is_enabled():
+                print("더보기 버튼 비활성화 → 종료")
+                break
+
+            try:
+                await more_btn.click()
+                await page.wait_for_timeout(1500)
+            except Exception as e:
+                print("더보기 클릭 실패:", e)
+                break
+
+        # =========================
+        # 데이터 추출
+        # =========================
+        
+        items = await page.evaluate("""
+        () => {
+            const cards = document.querySelectorAll("a[data-gtm='search_article']");
+            const results = [];
+
+            cards.forEach(card => {
+
+                const href = card.getAttribute("href") || "";
+                const fullUrl = href ? "https://www.daangn.com" + href : "";
+
+                // -------------------------
+                // 1️⃣ wrapper
+                // -------------------------
+                const wrapper = card.querySelector(":scope > div");
+                if (!wrapper) return;
+
+                // wrapper 안에
+                // [0] 썸네일 영역
+                // [1] 텍스트 영역
+                const children = wrapper.querySelectorAll(":scope > div");
+                if (children.length < 2) return;
+
+                const thumbnailArea = children[0];
+                const textContainer = children[1];
+
+                // -------------------------
+                // 2️⃣ 판매상태 (썸네일 영역 안)
+                // -------------------------
+                let status = "판매중";
+                const statusSpan = thumbnailArea.querySelector("span");
+                if (statusSpan) {
+                    const text = statusSpan.innerText.trim();
+                    if (text === "예약중" || text === "거래완료") {
+                        status = text;
+                    }
+                }
+
+                // -------------------------
+                // 3️⃣ info / meta 분리
+                // -------------------------
+                const textDivs = textContainer.querySelectorAll(":scope > div");
+                if (textDivs.length < 2) return;
+
+                const infoDiv = textDivs[0];
+                const metaDiv = textDivs[1];
+
+                const spans = infoDiv.querySelectorAll("span");
+
+                const title = spans[0]?.innerText?.trim() || "";
+                const price = spans[1]?.innerText?.trim() || "";
+
+                const location = metaDiv.querySelector("span span")?.innerText?.trim() || "";
+                const time = metaDiv.querySelector("time")?.innerText?.trim() || "";
+
+                if (!title) return;
+
+                results.push({
+                    title,
+                    price,
+                    location,
+                    time,
+                    status,
+                    url: fullUrl
+                });
+            });
+
+            return results;
+        }
+        """)
+
+
+        print(f"총 수집 개수: {len(items)}")
+
+        # =========================
+        # 🔥 CSV 저장
+        # =========================
+        with open("result.csv", "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=["title", "price", "location", "time", "status", "url"]
+            )
+            writer.writeheader()
+            writer.writerows(items)
+
+        print("result.csv 저장 완료")
+
+        await browser.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
