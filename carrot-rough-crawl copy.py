@@ -1,8 +1,13 @@
 import argparse
 import asyncio
 import csv
+import time
+from datetime import datetime
+from pathlib import Path
 from urllib.parse import quote
 from playwright.async_api import async_playwright
+
+RESULTS_DIR = Path("results")
 
 # =========================
 # 🔥 전역 설정 (인자 없을 때 기본값)
@@ -14,6 +19,20 @@ TARGET_COUNT = 1000
 
 ITEM_SELECTOR = "a[data-gtm='search_article']"
 MORE_BUTTON_SELECTOR = "div[data-gtm='search_show_more_articles'] button"
+
+# 상세 페이지 수집
+DETAIL_PAGE_DELAY_MS = 800   # 상세 페이지 간 대기 (ms)
+DETAIL_PAGE_TIMEOUT_MS = 15000
+
+# 당근 카테고리 (필터용)
+ALL_CATEGORIES = [
+    "디지털기기", "생활가전", "가구/인테리어", "생활/주방", "유아동", "유아도서",
+    "여성의류", "여성잡화", "남성패션/잡화", "뷰티/미용", "스포츠/레저", "취미/게임/음반",
+    "도서", "티켓/교환권", "e쿠폰", "가공식품", "건강기능식품", "반려동물용품", "식물",
+    "기타 중고물품", "삽니다",
+]
+# 수집할 카테고리 (비어 있으면 필터 없음 = 전체 수집)
+ALLOWED_CATEGORIES = ["디지털기기", "남성패션/잡화", "티켓/교환권", "e쿠폰"]
 
 # =========================
 
@@ -28,20 +47,124 @@ def _build_search_url(keyword: str | None = None, region: str | None = None) -> 
     return url
 
 
+def _extract_detail_js() -> str:
+    """상세 페이지에서 추가 정보를 추출하는 JS. 당근마켓 DOM에 맞게 셀렉터 수정 가능."""
+    return """
+    () => {
+        const out = { title: "", description: "", image_count: "", seller_nickname: "", location: "", category: "", chat_count: "", interest_count: "", view_count: "", manner_temperature: "" };
+        // 상세 페이지 제목 (h1)
+        const titleEl = document.querySelector('#main-content article div._4y5lbr4 h1') || document.querySelector('#main-content article h1') || document.querySelector('article h1');
+        if (titleEl) out.title = titleEl.innerText.trim();
+        // 글 본문 (p._4y5lbrd)
+        const descEl = document.querySelector('p._4y5lbrd') || document.querySelector('#main-content article p._4y5lbrd');
+        if (descEl) {
+            out.description = descEl.innerText.trim().replace(/\\n+/g, " ");
+        }
+        if (!out.description) {
+            const bodySelectors = ["article section p", "article [class*='content']", "main section p", "article p"];
+            for (const sel of bodySelectors) {
+                const el = document.querySelector(sel);
+                if (el) {
+                    out.description = el.innerText.trim().replace(/\\n+/g, " ");
+                    if (out.description.length > 10) break;
+                }
+            }
+        }
+        const article = document.querySelector("article");
+        if (article && !out.description) {
+            const text = article.innerText.trim().replace(/\\n+/g, " ");
+            if (text.length > 20) out.description = text;
+        }
+        // 카테고리 (section[2] div h2 > a[href*="category_id"]: "여성잡화")
+        const catH2 = document.querySelector('#main-content article section:nth-of-type(2) div h2._4y5lbr9') || document.querySelector('#main-content article section:nth-of-type(2) div h2');
+        if (catH2) {
+            const catLink = catH2.querySelector('a[href*="category_id"]') || catH2.querySelector('a');
+            if (catLink) out.category = catLink.innerText.trim();
+        }
+        // 채팅/관심/조회 (section[2] span._1pwsqmme: "채팅 22", "관심 33", "조회 1582")
+        const section2 = document.querySelector('#main-content article section:nth-of-type(2)');
+        if (section2) {
+            const statSpans = section2.querySelectorAll('span._1pwsqmme');
+            statSpans.forEach(s => {
+                const t = s.innerText.trim();
+                if (t.startsWith('채팅')) out.chat_count = t.replace(/[^0-9]/g, '');
+                else if (t.startsWith('관심')) out.interest_count = t.replace(/[^0-9]/g, '');
+                else if (t.startsWith('조회')) out.view_count = t.replace(/[^0-9]/g, '');
+            });
+        }
+        // 매너 온도 (span.yzp7msi: "39.7°C")
+        const tempSpan = document.querySelector('span.yzp7msi') || document.querySelector('#main-content article [class*="yzp7ms"] span');
+        if (tempSpan && tempSpan.innerText.includes('°')) out.manner_temperature = tempSpan.innerText.trim();
+        // 판매자 영역: 프로필+닉네임+동네
+        const profileAnchor = document.querySelector('a[aria-label*="프로필"]');
+        if (profileAnchor) {
+            const container = profileAnchor.closest('div');
+            if (container) {
+                const userLinks = container.querySelectorAll('a[href*="/kr/users/"]');
+                for (const a of userLinks) {
+                    const t = a.innerText.trim();
+                    if (t.length > 0 && t.length < 50 && !t.includes('프로필')) {
+                        out.seller_nickname = t;
+                        break;
+                    }
+                }
+                const locLink = container.querySelector('a[href*="in="]');
+                if (locLink) out.location = locLink.innerText.trim();
+            }
+        }
+        // 이미지 개수
+        const imgs = document.querySelectorAll("article img, [class*='image'] img, main img");
+        if (imgs.length) out.image_count = String(imgs.length);
+        return out;
+    }
+    """
+
+
+async def _fetch_detail(page, url: str) -> dict:
+    """상세 페이지에 들어가서 본문 등 추가 정보를 추출해 반환."""
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=DETAIL_PAGE_TIMEOUT_MS)
+        await page.wait_for_timeout(500)
+        data = await page.evaluate(_extract_detail_js())
+        return data
+    except Exception as e:
+        return {"title": "", "description": f"[조회실패: {e!s}]", "image_count": "", "seller_nickname": "", "location": "", "category": "", "chat_count": "", "interest_count": "", "view_count": "", "manner_temperature": ""}
+
+
 def _parse_args():
     parser = argparse.ArgumentParser(
         description="당근마켓 검색 크롤링",
-        epilog="예시:  python carrot-rough-crawl.py --keyword 아이폰",
+        epilog="예시:  python carrot-rough-crawl.py --keyword 아이폰 --categories 디지털기기,티켓/교환권",
     )
     parser.add_argument("--keyword", "-k", default=None, help="검색 키워드 (생략 시 전체 리스트)")
+    parser.add_argument(
+        "--categories", "-c",
+        default=None,
+        help="수집할 카테고리 (쉼표 구분). 예: 디지털기기,남성패션/잡화,티켓/교환권,e쿠폰. 비우면 스크립트 기본값 사용, --no-filter 이면 전체 수집",
+    )
+    parser.add_argument("--no-filter", action="store_true", help="카테고리 필터 없이 전체 수집")
     # parser.add_argument("--region", "-r", help="동네 (동이름-코드, 예: 역삼동-6035). 미사용 시 내 위치 기준")
     return parser.parse_args()
 
 
-async def main(keyword: str | None = None):
+async def main(keyword: str | None = None, allowed_categories: list[str] | None = None, no_filter: bool = False):
+    if no_filter:
+        allowed_set = None
+    elif allowed_categories is None:
+        allowed_set = set(ALLOWED_CATEGORIES)
+    else:
+        allowed_set = set(allowed_categories) if allowed_categories else None
+
     search_url = _build_search_url(keyword)
     print("검색 URL:", search_url)
     print("키워드:", keyword if (keyword and keyword.strip()) else "(없음)")
+    if allowed_set:
+        print("카테고리 필터:", ", ".join(sorted(allowed_set)))
+    else:
+        print("카테고리 필터: 없음 (전체 수집)")
+
+    start_time = time.perf_counter()
+    print("크롤링 시작")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -149,6 +272,8 @@ async def main(keyword: str | None = None):
 
                 const location = metaDiv.querySelector("span span")?.innerText?.trim() || "";
                 const time = metaDiv.querySelector("time")?.innerText?.trim() || "";
+                const categoryEl = card.querySelector('a[href*="category_id"]');
+                const category = categoryEl ? categoryEl.innerText.trim() : "";
 
                 if (!title) return;
 
@@ -158,7 +283,10 @@ async def main(keyword: str | None = None):
                     location,
                     time,
                     status,
-                    url: fullUrl
+                    url: fullUrl,
+                    category,
+                    description: "",
+                    image_count: ""
                 });
             });
 
@@ -167,24 +295,76 @@ async def main(keyword: str | None = None):
         """)
 
 
-        print(f"총 수집 개수: {len(items)}")
+        print(f"리스트 수집 개수: {len(items)}")
+
+        # 리스트에서 카테고리 알 수 있으면 미리 필터 → 상세 방문 횟수 감소
+        if allowed_set:
+            known_allowed = [i for i in items if i.get("category") in allowed_set]
+            unknown = [i for i in items if not (i.get("category") or "").strip()]
+            items_to_detail = known_allowed + unknown  # 허용된 것 + 카테고리 미확인(상세에서 확인)
+            skipped = len(items) - len(items_to_detail)
+            if skipped > 0:
+                print(f"카테고리 필터로 상세 생략: {skipped}건 (상세 수집 대상: {len(items_to_detail)}건)")
+        else:
+            items_to_detail = items
 
         # =========================
-        # 🔥 CSV 저장
+        # 🔥 상세 페이지 추가 수집
         # =========================
-        with open("result.csv", "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=["title", "price", "location", "time", "status", "url"]
-            )
+        total = len(items_to_detail)
+        for i, item in enumerate(items_to_detail):
+            print(f"상세 페이지 수집 중 {i + 1}/{total} - {item.get('title', '')[:30]}...")
+            extra = await _fetch_detail(page, item["url"])
+            if extra.get("title"):
+                item["title"] = extra["title"]
+            item["description"] = extra.get("description", "")
+            item["image_count"] = extra.get("image_count", "")
+            item["seller_nickname"] = extra.get("seller_nickname", "")
+            if extra.get("location"):
+                item["location"] = extra["location"]
+            item["category"] = extra.get("category", "")
+            item["chat_count"] = extra.get("chat_count", "")
+            item["interest_count"] = extra.get("interest_count", "")
+            item["view_count"] = extra.get("view_count", "")
+            item["manner_temperature"] = extra.get("manner_temperature", "")
+            if i < total - 1:
+                await page.wait_for_timeout(DETAIL_PAGE_DELAY_MS)
+
+        # 상세에서 확인한 카테고리로 한 번 더 필터 (카테고리 미확인だった건 포함)
+        if allowed_set:
+            items_to_write = [i for i in items_to_detail if i.get("category") in allowed_set]
+            print(f"카테고리 필터 결과: {len(items_to_write)}건 저장")
+        else:
+            items_to_write = items_to_detail
+
+        # =========================
+        # 🔥 CSV 저장 (results/년-월-일-시-분-초.csv)
+        # =========================
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+        out_path = RESULTS_DIR / f"{timestamp}.csv"
+        fieldnames = ["title", "price", "location", "time", "status", "category", "seller_nickname", "description", "image_count", "chat_count", "interest_count", "view_count", "manner_temperature", "url"]
+        with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
-            writer.writerows(items)
+            writer.writerows(items_to_write)
 
-        print("result.csv 저장 완료")
+        print(f"{out_path} 저장 완료")
+
+        elapsed = time.perf_counter() - start_time
+        m, s = divmod(int(elapsed), 60)
+        if m > 0:
+            print(f"총 크롤링 시간: {m}분 {s}초 ({elapsed:.1f}초)")
+        else:
+            print(f"총 크롤링 시간: {elapsed:.1f}초")
 
         await browser.close()
 
 
 if __name__ == "__main__":
     args = _parse_args()
-    asyncio.run(main(keyword=args.keyword))
+    if args.categories is not None:
+        allowed = [c.strip() for c in args.categories.split(",") if c.strip()]
+    else:
+        allowed = None
+    asyncio.run(main(keyword=args.keyword, allowed_categories=allowed, no_filter=args.no_filter))

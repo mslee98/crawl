@@ -13,7 +13,7 @@ RESULTS_DIR = Path("results")
 # 🔥 전역 설정 (인자 없을 때 기본값)
 # =========================
 
-HEADLESS = False          # True면 브라우저 안보임
+HEADLESS = True          # True면 브라우저 안보임
 SLOW_MO = 0               # 동작 느리게 보고 싶으면 100~300
 TARGET_COUNT = 1000
 
@@ -21,8 +21,20 @@ ITEM_SELECTOR = "a[data-gtm='search_article']"
 MORE_BUTTON_SELECTOR = "div[data-gtm='search_show_more_articles'] button"
 
 # 상세 페이지 수집
-DETAIL_PAGE_DELAY_MS = 800   # 상세 페이지 간 대기 (ms)
+DETAIL_PAGE_DELAY_MS = 800   # 배치/요청 간 대기 (ms)
+DETAIL_PAGE_DELAY_MS_ON_FAIL = 200   # 상세 실패 시 다음 대기 (ms)
 DETAIL_PAGE_TIMEOUT_MS = 15000
+DETAIL_PAGE_CONCURRENCY = 4   # 동시 상세 수집 수 (2~5 권장)
+DETAIL_PAGE_WAIT_SELECTOR = "#main-content article"   # 상세 로드 완료 판단용
+DETAIL_PAGE_WAIT_TIMEOUT_MS = 5000
+DETAIL_PAGE_FALLBACK_MS = 200   # selector 대기 실패 시 추가 대기
+
+# 더보기 클릭 후 대기 (조건부)
+MORE_BUTTON_POLL_INTERVAL_MS = 200   # 카드 수 증가 확인 간격
+MORE_BUTTON_POLL_MAX_MS = 5000   # 최대 대기
+
+# 리스트 첫 로드
+LIST_PAGE_WAIT_SELECTOR_TIMEOUT_MS = 10000
 
 # 당근 카테고리 (필터용)
 ALL_CATEGORIES = [
@@ -122,13 +134,18 @@ def _extract_detail_js() -> str:
 
 async def _fetch_detail(page, url: str) -> dict:
     """상세 페이지에 들어가서 본문 등 추가 정보를 추출해 반환."""
+    fail_result = {"title": "", "description": "", "image_count": "", "seller_nickname": "", "location": "", "category": "", "chat_count": "", "interest_count": "", "view_count": "", "manner_temperature": ""}
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=DETAIL_PAGE_TIMEOUT_MS)
-        await page.wait_for_timeout(500)
+        try:
+            await page.wait_for_selector(DETAIL_PAGE_WAIT_SELECTOR, timeout=DETAIL_PAGE_WAIT_TIMEOUT_MS)
+        except Exception:
+            await page.wait_for_timeout(DETAIL_PAGE_FALLBACK_MS)
         data = await page.evaluate(_extract_detail_js())
         return data
     except Exception as e:
-        return {"title": "", "description": f"[조회실패: {e!s}]", "image_count": "", "seller_nickname": "", "location": "", "category": "", "chat_count": "", "interest_count": "", "view_count": "", "manner_temperature": ""}
+        fail_result["description"] = f"[조회실패: {e!s}]"
+        return fail_result
 
 
 def _parse_args():
@@ -173,8 +190,8 @@ async def main(keyword: str | None = None, allowed_categories: list[str] | None 
         )
         page = await browser.new_page()
 
-        await page.goto(search_url)
-        await page.wait_for_load_state("networkidle")
+        await page.goto(search_url, wait_until="domcontentloaded")
+        await page.wait_for_selector(ITEM_SELECTOR, timeout=LIST_PAGE_WAIT_SELECTOR_TIMEOUT_MS)
 
         print("페이지 타이틀:", await page.title())
 
@@ -210,7 +227,14 @@ async def main(keyword: str | None = None, allowed_categories: list[str] | None 
 
             try:
                 await more_btn.click()
-                await page.wait_for_timeout(1500)
+                deadline = time.monotonic() + MORE_BUTTON_POLL_MAX_MS / 1000
+                while True:
+                    await asyncio.sleep(MORE_BUTTON_POLL_INTERVAL_MS / 1000)
+                    new_count = await cards.count()
+                    if new_count > prev_count:
+                        break
+                    if time.monotonic() >= deadline:
+                        break
             except Exception as e:
                 print("더보기 클릭 실패:", e)
                 break
@@ -294,6 +318,17 @@ async def main(keyword: str | None = None, allowed_categories: list[str] | None 
         }
         """)
 
+        # URL 기준 중복 제거 (끌올 등으로 같은 글이 여러 번 나올 수 있음)
+        seen_urls = set()
+        items_deduped = []
+        for i in items:
+            u = i.get("url") or ""
+            if u and u not in seen_urls:
+                seen_urls.add(u)
+                items_deduped.append(i)
+        if len(items_deduped) < len(items):
+            print(f"URL 중복 제거: {len(items)} → {len(items_deduped)}건")
+        items = items_deduped
 
         print(f"리스트 수집 개수: {len(items)}")
 
@@ -309,26 +344,50 @@ async def main(keyword: str | None = None, allowed_categories: list[str] | None 
             items_to_detail = items
 
         # =========================
-        # 🔥 상세 페이지 추가 수집
+        # 🔥 상세 페이지 추가 수집 (병렬)
         # =========================
         total = len(items_to_detail)
-        for i, item in enumerate(items_to_detail):
-            print(f"상세 페이지 수집 중 {i + 1}/{total} - {item.get('title', '')[:30]}...")
-            extra = await _fetch_detail(page, item["url"])
-            if extra.get("title"):
-                item["title"] = extra["title"]
-            item["description"] = extra.get("description", "")
-            item["image_count"] = extra.get("image_count", "")
-            item["seller_nickname"] = extra.get("seller_nickname", "")
-            if extra.get("location"):
-                item["location"] = extra["location"]
-            item["category"] = extra.get("category", "")
-            item["chat_count"] = extra.get("chat_count", "")
-            item["interest_count"] = extra.get("interest_count", "")
-            item["view_count"] = extra.get("view_count", "")
-            item["manner_temperature"] = extra.get("manner_temperature", "")
-            if i < total - 1:
-                await page.wait_for_timeout(DETAIL_PAGE_DELAY_MS)
+        concurrency = min(DETAIL_PAGE_CONCURRENCY, total) if total else 0
+        detail_pages = []
+
+        if total > 0 and concurrency > 0:
+            detail_pages = [await browser.new_page() for _ in range(concurrency)]
+            print(f"상세 수집 병렬 수: {concurrency}")
+
+        for chunk_start in range(0, total, concurrency if concurrency else 1):
+            chunk = items_to_detail[chunk_start : chunk_start + concurrency]
+            for i, item in enumerate(chunk):
+                print(f"상세 페이지 수집 중 {chunk_start + i + 1}/{total} - {item.get('title', '')[:30]}...")
+            tasks = [_fetch_detail(detail_pages[j], chunk[j]["url"]) for j in range(len(chunk))]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for j, item in enumerate(chunk):
+                r = results[j]
+                if isinstance(r, Exception):
+                    extra = {"title": "", "description": f"[조회실패: {r!s}]", "image_count": "", "seller_nickname": "", "location": "", "category": "", "chat_count": "", "interest_count": "", "view_count": "", "manner_temperature": ""}
+                else:
+                    extra = r
+                if extra.get("title"):
+                    item["title"] = extra["title"]
+                item["description"] = extra.get("description", "")
+                item["image_count"] = extra.get("image_count", "")
+                item["seller_nickname"] = extra.get("seller_nickname", "")
+                if extra.get("location"):
+                    item["location"] = extra["location"]
+                item["category"] = extra.get("category", "")
+                item["chat_count"] = extra.get("chat_count", "")
+                item["interest_count"] = extra.get("interest_count", "")
+                item["view_count"] = extra.get("view_count", "")
+                item["manner_temperature"] = extra.get("manner_temperature", "")
+            any_fail = any(
+                isinstance(r, Exception) or ((r.get("description") or "").startswith("[조회실패") if isinstance(r, dict) else False)
+                for r in results
+            )
+            delay_ms = DETAIL_PAGE_DELAY_MS_ON_FAIL if any_fail else DETAIL_PAGE_DELAY_MS
+            if chunk_start + len(chunk) < total:
+                await asyncio.sleep(delay_ms / 1000)
+
+        for p in detail_pages:
+            await p.close()
 
         # 상세에서 확인한 카테고리로 한 번 더 필터 (카테고리 미확인だった건 포함)
         if allowed_set:
@@ -343,7 +402,7 @@ async def main(keyword: str | None = None, allowed_categories: list[str] | None 
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
         out_path = RESULTS_DIR / f"{timestamp}.csv"
-        fieldnames = ["title", "price", "location", "time", "status", "category", "seller_nickname", "description", "image_count", "chat_count", "interest_count", "view_count", "manner_temperature", "url"]
+        fieldnames = ["title", "price", "location", "time", "status", "category", "seller_nickname", "image_count", "chat_count", "interest_count", "view_count", "manner_temperature", "description", "url"]
         with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
             writer.writeheader()
