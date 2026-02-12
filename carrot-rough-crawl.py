@@ -17,11 +17,14 @@ MORE_BUTTON_SELECTOR = "div[data-gtm='search_show_more_articles'] button"
 
 # =========================
 
-def _build_search_url(keyword: str, region: str | None = None) -> str:
-    """검색 키워드로 당근 검색 URL 생성."""
+def _build_search_url(keyword: str | None = None, region: str | None = None) -> str:
+    """검색 키워드로 당근 검색 URL 생성. 키워드 없으면 리스트 기본 URL 반환."""
     base = "https://www.daangn.com/kr/buy-sell/"
-    url = f"{base}?search={quote(keyword)}"
-    # region 사용 시: url += f"&in={quote(region)}"
+    if keyword and keyword.strip():
+        url = f"{base}?search={quote(keyword.strip())}"
+    else:
+        url = base
+    # region 사용 시: url += f"&in={quote(region)}" if "?" in url else f"?in={quote(region)}"
     return url
 
 
@@ -30,15 +33,15 @@ def _parse_args():
         description="당근마켓 검색 크롤링",
         epilog="예시:  python carrot-rough-crawl.py --keyword 아이폰",
     )
-    parser.add_argument("--keyword", "-k", required=True, help="검색 키워드")
+    parser.add_argument("--keyword", "-k", default=None, help="검색 키워드 (생략 시 전체 리스트)")
     # parser.add_argument("--region", "-r", help="동네 (동이름-코드, 예: 역삼동-6035). 미사용 시 내 위치 기준")
     return parser.parse_args()
 
 
-async def main(keyword: str):
+async def main(keyword: str | None = None):
     search_url = _build_search_url(keyword)
     print("검색 URL:", search_url)
-    print("키워드:", keyword)
+    print("키워드:", keyword if (keyword and keyword.strip()) else "(없음)")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
