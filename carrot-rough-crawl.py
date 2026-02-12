@@ -48,14 +48,23 @@ ALLOWED_CATEGORIES = ["디지털기기", "남성패션/잡화", "티켓/교환�
 
 # =========================
 
-def _build_search_url(keyword: str | None = None, region: str | None = None) -> str:
-    """검색 키워드로 당근 검색 URL 생성. 키워드 없으면 리스트 기본 URL 반환."""
+def _build_search_url(
+    keyword: str | None = None,
+    region: str | None = None,
+    min_price: int | None = None,
+    max_price: int | None = None,
+) -> str:
+    """검색 키워드·지역·가격으로 당근 검색 URL 생성. 가격은 price=최소__최대 형식."""
     base = "https://www.daangn.com/kr/buy-sell/"
     if keyword and keyword.strip():
         url = f"{base}?search={quote(keyword.strip())}"
     else:
         url = base
     # region 사용 시: url += f"&in={quote(region)}" if "?" in url else f"?in={quote(region)}"
+    if min_price is not None or max_price is not None:
+        price_val = f"{min_price or ''}__{max_price or ''}"
+        url += "&" if "?" in url else "?"
+        url += f"price={price_val}"
     return url
 
 
@@ -160,11 +169,19 @@ def _parse_args():
         help="수집할 카테고리 (쉼표 구분). 예: 디지털기기,남성패션/잡화,티켓/교환권,e쿠폰. 비우면 스크립트 기본값 사용, --no-filter 이면 전체 수집",
     )
     parser.add_argument("--no-filter", action="store_true", help="카테고리 필터 없이 전체 수집")
+    parser.add_argument("--min-price", type=int, default=None, metavar="N", help="가격 최소값 (원). 예: 50000")
+    parser.add_argument("--max-price", type=int, default=None, metavar="N", help="가격 최대값 (원). 예: 10000000")
     # parser.add_argument("--region", "-r", help="동네 (동이름-코드, 예: 역삼동-6035). 미사용 시 내 위치 기준")
     return parser.parse_args()
 
 
-async def main(keyword: str | None = None, allowed_categories: list[str] | None = None, no_filter: bool = False):
+async def main(
+    keyword: str | None = None,
+    allowed_categories: list[str] | None = None,
+    no_filter: bool = False,
+    min_price: int | None = None,
+    max_price: int | None = None,
+):
     if no_filter:
         allowed_set = None
     elif allowed_categories is None:
@@ -172,9 +189,11 @@ async def main(keyword: str | None = None, allowed_categories: list[str] | None 
     else:
         allowed_set = set(allowed_categories) if allowed_categories else None
 
-    search_url = _build_search_url(keyword)
+    search_url = _build_search_url(keyword, min_price=min_price, max_price=max_price)
     print("검색 URL:", search_url)
     print("키워드:", keyword if (keyword and keyword.strip()) else "(없음)")
+    if min_price is not None or max_price is not None:
+        print("가격 조건:", f"{min_price or '?'}원 ~ {max_price or '?'}원")
     if allowed_set:
         print("카테고리 필터:", ", ".join(sorted(allowed_set)))
     else:
@@ -426,4 +445,10 @@ if __name__ == "__main__":
         allowed = [c.strip() for c in args.categories.split(",") if c.strip()]
     else:
         allowed = None
-    asyncio.run(main(keyword=args.keyword, allowed_categories=allowed, no_filter=args.no_filter))
+    asyncio.run(main(
+        keyword=args.keyword,
+        allowed_categories=allowed,
+        no_filter=args.no_filter,
+        min_price=args.min_price,
+        max_price=args.max_price,
+    ))

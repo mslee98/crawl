@@ -31,13 +31,20 @@ source .venv/bin/activate
 python carrot-rough-crawl.py --keyword 아이폰
 ```
 
-| 옵션 | 설명 |
-|------|------|
-| `--keyword`, `-k` | 검색 키워드 (생략 시 전체 리스트) |
-| `--categories`, `-c` | 수집할 카테고리 (쉼표 구분). 예: `디지털기기,티켓/교환권` |
-| `--no-filter` | 카테고리 필터 없이 전체 수집 |
+#### 모든 실행 옵션 (CLI)
 
-**실행 예시**
+| 옵션 (긴 형식) | 짧은 형식 | 타입 | 기본값 | 설명 |
+|----------------|-----------|------|--------|------|
+| `--keyword` | `-k` | 문자열 | 없음 | 검색 키워드. 생략 시 전체 리스트에서 수집 |
+| `--categories` | `-c` | 문자열(쉼표 구분) | 스크립트 기본값 | 수집할 카테고리. 예: `디지털기기,티켓/교환권,e쿠폰` |
+| `--no-filter` | — | 플래그 | `False` | 카테고리 필터 없이 전체 수집 (모든 카테고리) |
+| `--min-price` | — | 정수 | 없음 | 가격 최소값(원). 예: `50000` → 5만원 이상 |
+| `--max-price` | — | 정수 | 없음 | 가격 최대값(원). 예: `10000000` → 1000만원 이하 |
+
+- **가격**: `--min-price` / `--max-price` 는 당근 URL의 `price=최소__최대` 형식으로 적용됩니다. 둘 다 생략 가능하며, 최소만·최대만 지정 가능합니다.
+- **카테고리**: `--categories` 를 주면 해당 카테고리만 수집·저장합니다. `--no-filter` 를 주면 카테고리 필터를 쓰지 않고 전체 수집합니다.
+
+#### 실행 예시
 
 ```bash
 # 키워드만 (기본 카테고리 필터: 디지털기기, 남성패션/잡화, 티켓/교환권, e쿠폰)
@@ -45,28 +52,56 @@ python carrot-rough-crawl.py -k 노트북
 
 # 수집할 카테고리 지정
 python carrot-rough-crawl.py -k 아이폰 --categories 디지털기기,티켓/교환권
+python carrot-rough-crawl.py -k 아이폰 -c 디지털기기,남성패션/잡화,e쿠폰
 
 # 카테고리 필터 없이 전체 수집
 python carrot-rough-crawl.py -k 아이폰 --no-filter
 
 # 키워드 없이 전체 리스트 수집
 python carrot-rough-crawl.py
+
+# 가격 조건: 5만원 이상 ~ 1000만원 이하
+python carrot-rough-crawl.py -k 아이폰 --min-price 50000 --max-price 10000000
+
+# 최소가만 (5만원 이상)
+python carrot-rough-crawl.py -k 노트북 --min-price 50000
+
+# 최대가만 (100만원 이하)
+python carrot-rough-crawl.py -k 갤럭시 --max-price 1000000
+
+# 키워드 + 카테고리 + 가격 조합
+python carrot-rough-crawl.py -k 아이폰 -c 디지털기기,티켓/교환권 --min-price 100000 --max-price 5000000
 ```
 
-- 실행 시 **브라우저 창이 뜹니다** (`HEADLESS=False`). 동작을 눈으로 확인할 수 있습니다.
-- 콘솔에 리스트 수집 개수, 상세 수집 진행, 카테고리 필터 결과, **총 크롤링 시간**이 출력됩니다.
+- 실행 시 브라우저 표시 여부는 스크립트 상단 `HEADLESS` 값에 따릅니다 (`False` 면 창 표시).
+- 콘솔에 검색 URL, 키워드, 가격 조건, 카테고리 필터, 리스트 수집 개수, 상세 수집 진행, **총 크롤링 시간** 등이 출력됩니다.
 
 ### 설정 (스크립트 상단)
 
+`carrot-rough-crawl.py` 상단에서 아래 상수들을 수정할 수 있습니다.
+
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
+| **리스트 수집** | | |
 | `TARGET_COUNT` | `1000` | 리스트에서 수집 목표 카드 개수 |
-| `HEADLESS` | `False` | `True` 면 브라우저 비표시 |
-| `DETAIL_PAGE_DELAY_MS` | `800` | 상세 페이지 간 대기(ms) |
+| `HEADLESS` | `True` | `True` 면 브라우저 비표시, `False` 면 창 표시 |
+| `SLOW_MO` | `0` | 동작 지연(ms). 100~300 이면 동작을 천천히 확인 가능 |
+| `LIST_PAGE_WAIT_SELECTOR_TIMEOUT_MS` | `10000` | 리스트 첫 로드 시 카드 대기 타임아웃(ms) |
+| **더보기** | | |
+| `MORE_BUTTON_POLL_INTERVAL_MS` | `200` | 더보기 클릭 후 카드 수 증가 확인 간격(ms) |
+| `MORE_BUTTON_POLL_MAX_MS` | `5000` | 더보기 클릭 후 최대 대기(ms) |
+| **상세 페이지 수집** | | |
+| `DETAIL_PAGE_CONCURRENCY` | `4` | 동시 상세 수집 수 (2~5 권장) |
+| `DETAIL_PAGE_DELAY_MS` | `800` | 배치/요청 간 대기(ms) |
+| `DETAIL_PAGE_DELAY_MS_ON_FAIL` | `200` | 상세 실패 시 다음 대기(ms) |
 | `DETAIL_PAGE_TIMEOUT_MS` | `15000` | 상세 페이지 로딩 타임아웃(ms) |
-| `ALLOWED_CATEGORIES` | `["디지털기기", "남성패션/잡화", "티켓/교환권", "e쿠폰"]` | 수집할 카테고리 (필터 사용 시) |
+| `DETAIL_PAGE_WAIT_SELECTOR` | `"#main-content article"` | 상세 로드 완료 판단용 셀렉터 |
+| `DETAIL_PAGE_WAIT_TIMEOUT_MS` | `5000` | 위 셀렉터 대기 타임아웃(ms) |
+| `DETAIL_PAGE_FALLBACK_MS` | `200` | 셀렉터 대기 실패 시 추가 대기(ms) |
+| **카테고리 필터** | | |
+| `ALLOWED_CATEGORIES` | `["디지털기기", "남성패션/잡화", "티켓/교환권", "e쿠폰"]` | `--categories` 미지정 시 사용할 카테고리 목록 |
 
-`ALL_CATEGORIES` 에 당근 전체 카테고리 목록이 정의되어 있으며, `--categories` 로 필요한 것만 선택할 수 있습니다.
+- `ALL_CATEGORIES`: 당근 전체 카테고리 목록(필터/검증용). `--categories` 에 넣을 수 있는 값은 이 목록 기준입니다.
 
 ### 출력 파일
 
@@ -100,8 +135,8 @@ python carrot-rough-crawl.py
 
 ### 동작 흐름
 
-1. 검색 URL(`/kr/buy-sell/?search=키워드` 또는 키워드 없이 리스트) 로 이동 후 `networkidle` 대기.
-2. **더보기** 버튼 반복 클릭 → 목표 개수 도달 또는 더보기 없음/비활성화 시 종료.
+1. 검색 URL(`/kr/buy-sell/?search=키워드` + 선택적으로 `&price=최소__최대`) 로 이동 후 `domcontentloaded` + 리스트 카드 셀렉터 대기.
+2. **더보기** 버튼 반복 클릭(카드 수 증가 시까지 폴링) → 목표 개수 도달 또는 더보기 없음/비활성화 시 종료.
 3. 리스트 카드에서 `title`, `price`, `location`, `time`, `status`, `url`, `category`(있으면) 추출.
 4. 카테고리 필터 사용 시: 허용 카테고리 또는 미확인만 상세 수집 대상으로 선택.
 5. **상세 페이지** 방문: 제목·본문·카테고리·판매자·동네·채팅/관심/조회·매너온도·이미지 수 추출 후 항목에 병합.
