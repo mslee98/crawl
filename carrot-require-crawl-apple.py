@@ -1,6 +1,13 @@
+"""
+당근마켓 크롤링 - 애플 고정 버전
+- 검색 키워드: 애플 (고정)
+- 판매완료(거래완료)만 수집
+- 금액 35,000원 이상만 추출
+"""
 import argparse
 import asyncio
 import csv
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -10,12 +17,17 @@ from playwright.async_api import async_playwright
 RESULTS_DIR = Path("results")
 
 # =========================
-# 🔥 전역 설정 (인자 없을 때 기본값)
+# 🔥 애플 고정 버전 전역 설정
 # =========================
 
 HEADLESS = False          # True면 브라우저 안보임
 SLOW_MO = 0               # 동작 느리게 보고 싶으면 100~300
 TARGET_COUNT = 1000
+
+# 애플 고정 + 판매완료 + 35,000원 이상
+DEFAULT_KEYWORD = "애플"
+DEFAULT_MIN_PRICE = 35000
+SOLD_STATUSES = ("거래완료", "판매완료")   # 이 상태만 수집
 
 ITEM_SELECTOR = "a[data-gtm='search_article']"
 MORE_BUTTON_SELECTOR = "div[data-gtm='search_show_more_articles'] button"
@@ -48,6 +60,18 @@ ALLOWED_CATEGORIES = ["디지털기기", "남성패션/잡화", "티켓/교환�
 
 # =========================
 
+
+def _parse_price(price_str: str) -> int | None:
+    """가격 문자열을 원 단위 정수로 변환. 파싱 실패 시 None."""
+    if not price_str or not isinstance(price_str, str):
+        return None
+    s = price_str.strip().replace(",", "").replace("원", "").strip()
+    numbers = re.findall(r"\d+", s)
+    if not numbers:
+        return None
+    return int(numbers[0])
+
+
 def _build_search_url(
     keyword: str | None = None,
     region: str | None = None,
@@ -60,7 +84,6 @@ def _build_search_url(
         url = f"{base}?search={quote(keyword.strip())}"
     else:
         url = base
-    # region 사용 시: url += f"&in={quote(region)}" if "?" in url else f"?in={quote(region)}"
     if min_price is not None or max_price is not None:
         price_val = f"{min_price or ''}__{max_price or ''}"
         url += "&" if "?" in url else "?"
@@ -110,19 +133,49 @@ async def _fetch_detail(page, url: str) -> dict:
 
 def _parse_args():
     parser = argparse.ArgumentParser(
-        description="당근마켓 검색 크롤링",
-        epilog="예시:  python carrot-rough-crawl.py --keyword 아이폰 --categories 디지털기기,티켓/교환권",
+        description="당근마켓 크롤링 - 애플 고정 (판매완료, 35,000원 이상)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+필터 옵션 정리
+---------------
+  상태 필터 (둘 중 하나만 사용)
+    --sold-only      거래완료/판매완료만 수집 (기본값). 검색 결과에 완료 글이 없으면 0건이 됨.
+    --no-sold-only   상태 무시, 전부 수집 (가격/카테고리만 적용). 283건 유지하려면 이 옵션 사용.
+
+  가격 필터
+    --min-price N    N원 이상만 (기본: 35000)
+    --max-price N    N원 이하만 (기본: 없음)
+
+  카테고리 필터
+    -c 디지털기기,티켓/교환권   해당 카테고리만
+    --no-filter                 카테고리 필터 없이 전체
+
+  검색
+    -k, --keyword    검색어 (기본: 애플)
+
+예시
+----
+  # 5만원 이상만, 상태 상관없이 전부 수집 (283건 유지)
+  python carrot-require-crawl-apple.py --min-price 50000 --no-sold-only
+
+  # 판매완료만 + 5만원 이상 (완료 글이 있어야 함)
+  python carrot-require-crawl-apple.py --min-price 50000
+
+  # 카테고리 없이 전부, 3만5천원 이상
+  python carrot-require-crawl-apple.py --no-filter --no-sold-only
+""",
     )
-    parser.add_argument("--keyword", "-k", default=None, help="검색 키워드 (생략 시 전체 리스트)")
+    parser.add_argument("--keyword", "-k", default=DEFAULT_KEYWORD, help=f"검색 키워드 (기본: {DEFAULT_KEYWORD})")
     parser.add_argument(
         "--categories", "-c",
         default=None,
-        help="수집할 카테고리 (쉼표 구분). 예: 디지털기기,남성패션/잡화,티켓/교환권,e쿠폰. 비우면 스크립트 기본값 사용, --no-filter 이면 전체 수집",
+        help="수집할 카테고리 (쉼표 구분). 비우면 스크립트 기본값 사용, --no-filter 이면 전체 수집",
     )
     parser.add_argument("--no-filter", action="store_true", help="카테고리 필터 없이 전체 수집")
-    parser.add_argument("--min-price", type=int, default=None, metavar="N", help="가격 최소값 (원). 예: 50000")
-    parser.add_argument("--max-price", type=int, default=None, metavar="N", help="가격 최대값 (원). 예: 10000000")
-    # parser.add_argument("--region", "-r", help="동네 (동이름-코드, 예: 역삼동-6035). 미사용 시 내 위치 기준")
+    parser.add_argument("--min-price", type=int, default=DEFAULT_MIN_PRICE, metavar="N", help=f"가격 최소값 원 (기본: {DEFAULT_MIN_PRICE})")
+    parser.add_argument("--max-price", type=int, default=None, metavar="N", help="가격 최대값 (원)")
+    parser.add_argument("--sold-only", action="store_true", default=True, dest="sold_only", help="거래완료/판매완료만 수집 (기본)")
+    parser.add_argument("--no-sold-only", action="store_false", dest="sold_only", help="상태 무시, 가격/카테고리만 적용 (0건 방지)")
     return parser.parse_args()
 
 
@@ -132,7 +185,11 @@ async def main(
     no_filter: bool = False,
     min_price: int | None = None,
     max_price: int | None = None,
+    sold_only: bool = True,
 ):
+    keyword = keyword or DEFAULT_KEYWORD
+    min_price = min_price if min_price is not None else DEFAULT_MIN_PRICE
+
     if no_filter:
         allowed_set = None
     elif allowed_categories is None:
@@ -141,10 +198,10 @@ async def main(
         allowed_set = set(allowed_categories) if allowed_categories else None
 
     search_url = _build_search_url(keyword, min_price=min_price, max_price=max_price)
+    print("[애플 고정 버전]", "판매완료만 + " if sold_only else "전체 상태 + ", f"{min_price}원 이상")
     print("검색 URL:", search_url)
-    print("키워드:", keyword if (keyword and keyword.strip()) else "(없음)")
-    if min_price is not None or max_price is not None:
-        print("가격 조건:", f"{min_price or '?'}원 ~ {max_price or '?'}원")
+    print("키워드:", keyword)
+    print("가격 조건:", f"{min_price}원 이상", f"~ {max_price}원" if max_price else "")
     if allowed_set:
         print("카테고리 필터:", ", ".join(sorted(allowed_set)))
     else:
@@ -223,36 +280,25 @@ async def main(
                 const href = card.getAttribute("href") || "";
                 const fullUrl = href ? "https://www.daangn.com" + href : "";
 
-                // -------------------------
-                // 1️⃣ wrapper
-                // -------------------------
                 const wrapper = card.querySelector(":scope > div");
                 if (!wrapper) return;
 
-                // wrapper 안에
-                // [0] 썸네일 영역
-                // [1] 텍스트 영역
                 const children = wrapper.querySelectorAll(":scope > div");
                 if (children.length < 2) return;
 
                 const thumbnailArea = children[0];
                 const textContainer = children[1];
 
-                // -------------------------
-                // 2️⃣ 판매상태 (썸네일 영역 안)
-                // -------------------------
+                // 판매상태 (거래완료 / 판매완료 / 예약중 / 판매중)
                 let status = "판매중";
                 const statusSpan = thumbnailArea.querySelector("span");
                 if (statusSpan) {
                     const text = statusSpan.innerText.trim();
-                    if (text === "예약중" || text === "거래완료") {
+                    if (text === "예약중" || text === "거래완료" || text === "판매완료") {
                         status = text;
                     }
                 }
 
-                // -------------------------
-                // 3️⃣ info / meta 분리
-                // -------------------------
                 const textDivs = textContainer.querySelectorAll(":scope > div");
                 if (textDivs.length < 2) return;
 
@@ -286,7 +332,7 @@ async def main(
         }
         """)
 
-        # URL 기준 중복 제거 (끌올 등으로 같은 글이 여러 번 나올 수 있음)
+        # URL 기준 중복 제거
         seen_urls = set()
         items_deduped = []
         for i in items:
@@ -300,11 +346,39 @@ async def main(
 
         print(f"리스트 수집 개수: {len(items)}")
 
+        # 🔥 상태 필터(선택) + 가격 필터
+        min_price_val = min_price
+        max_price_val = max_price  # None이면 상한 없음
+        items_filtered = []
+        for i in items:
+            if sold_only:
+                status = (i.get("status") or "").strip()
+                if status not in SOLD_STATUSES:
+                    continue
+            price_num = _parse_price(i.get("price") or "")
+            if price_num is None or price_num < min_price_val:
+                continue
+            if max_price_val is not None and price_num > max_price_val:
+                continue
+            items_filtered.append(i)
+        filter_desc = f"{min_price_val}원 이상"
+        if max_price_val is not None:
+            filter_desc += f" ~ {max_price_val}원 이하"
+        if sold_only:
+            filter_desc = "판매완료 + " + filter_desc
+        print(f"필터 ({filter_desc}): {len(items)} → {len(items_filtered)}건")
+        items = items_filtered
+
+        if not items:
+            print("조건에 맞는 게시글이 없습니다. 종료.")
+            await browser.close()
+            return
+
         # 리스트에서 카테고리 알 수 있으면 미리 필터 → 상세 방문 횟수 감소
         if allowed_set:
             known_allowed = [i for i in items if i.get("category") in allowed_set]
             unknown = [i for i in items if not (i.get("category") or "").strip()]
-            items_to_detail = known_allowed + unknown  # 허용된 것 + 카테고리 미확인(상세에서 확인)
+            items_to_detail = known_allowed + unknown
             skipped = len(items) - len(items_to_detail)
             if skipped > 0:
                 print(f"카테고리 필터로 상세 생략: {skipped}건 (상세 수집 대상: {len(items_to_detail)}건)")
@@ -348,7 +422,7 @@ async def main(
         for p in detail_pages:
             await p.close()
 
-        # 상세에서 확인한 카테고리로 한 번 더 필터 (카테고리 미확인だった건 포함)
+        # 상세에서 확인한 카테고리로 한 번 더 필터
         if allowed_set:
             items_to_write = [i for i in items_to_detail if i.get("category") in allowed_set]
             print(f"카테고리 필터 결과: {len(items_to_write)}건 저장")
@@ -360,8 +434,7 @@ async def main(
         # =========================
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-        out_path = RESULTS_DIR / f"{timestamp}.csv"
-        # 타이틀, 가격, 주소, 시간, 상태, 카테고리만 저장
+        out_path = RESULTS_DIR / f"apple-sold-{timestamp}.csv"
         fieldnames = ["title", "price", "location", "time", "status", "category"]
         rows = [{k: item.get(k, "") for k in fieldnames} for item in items_to_write]
         with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
@@ -369,7 +442,7 @@ async def main(
             writer.writeheader()
             writer.writerows(rows)
 
-        print(f"{out_path} 저장 완료")
+        print(f"{out_path} 저장 완료 (판매완료, {min_price}원 이상)")
 
         elapsed = time.perf_counter() - start_time
         m, s = divmod(int(elapsed), 60)
@@ -393,4 +466,5 @@ if __name__ == "__main__":
         no_filter=args.no_filter,
         min_price=args.min_price,
         max_price=args.max_price,
+        sold_only=args.sold_only,
     ))
